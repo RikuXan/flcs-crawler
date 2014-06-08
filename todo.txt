@@ -1,0 +1,3 @@
+played champion in player scores
+global stats (gpm, avg gold, kda) in players
+put in all matches, played or not

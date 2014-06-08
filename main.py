@@ -3,20 +3,21 @@ import time
 import calendar
 import requests
 import pymysql
-import collections
 
 # Configuration values for database
 db_host = "host"
 db_port = 3306
-db_user = "user"
+db_user = "username"
 db_pass = "password"
-db_database = "db_name"
+db_database = "database"
 
 # Constants used in the program
-regions = {"NA": 104, "EU": 102}
+tournaments = {"S4SUMMERNA": 104, "S4SUMMEREU": 102}
 # Variables: Region ID, Start time for Matches (seconds since epoch), End time for matches (seconds since epoch)
 stats_api = "http://euw.lolesports.com/api/gameStatsFantasy.json?tournamentId=%s&dateBegin=%s&dateEnd=%s"
 match_api = "http://euw.lolesports.com/api/match/%s.json"  # Variables: Match ID
+tournament_api = "http://euw.lolesports.com/api/tournament/%s.json"  # Variables: Tournament ID
+team_api = "http://euw.lolesports.com/api/team/%s.json"  # Variable: Team ID
 
 
 def score_team_points(victory, barons, dragons, first_blood, towers):
@@ -56,7 +57,7 @@ CREATE TABLE `matches` (
   KEY `fk_matches_team2_id` (`team2_id`),
   CONSTRAINT `fk_matches_team2_id` FOREIGN KEY (`team2_id`) REFERENCES `teams` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_matches_team1_id` FOREIGN KEY (`team1_id`) REFERENCES `teams` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+) ENGINE=MYISAM DEFAULT CHARSET=latin1;
 
 -- ----------------------------
 -- Table structure for player_scores
@@ -78,7 +79,7 @@ CREATE TABLE `player_scores` (
   KEY `fk_player_scores_match_id` (`match_id`),
   CONSTRAINT `fk_player_scores_match_id` FOREIGN KEY (`match_id`) REFERENCES `matches` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_player_scores_player_id` FOREIGN KEY (`player_id`) REFERENCES `players` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+) ENGINE=MYISAM DEFAULT CHARSET=latin1;
 
 -- ----------------------------
 -- Table structure for players
@@ -92,7 +93,7 @@ CREATE TABLE `players` (
   PRIMARY KEY (`id`),
   KEY `fk_players_team_id` (`team_id`),
   CONSTRAINT `fk_players_team_id` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+) ENGINE=MYISAM DEFAULT CHARSET=latin1;
 
 -- ----------------------------
 -- Table structure for team_scores
@@ -115,7 +116,7 @@ CREATE TABLE `team_scores` (
   KEY `fk_team_scores_match_id` (`match_id`),
   CONSTRAINT `fk_team_scores_match_id` FOREIGN KEY (`match_id`) REFERENCES `matches` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_team_scores_team_id` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+) ENGINE=MYISAM DEFAULT CHARSET=latin1;
 
 -- ----------------------------
 -- Table structure for teams
@@ -127,7 +128,7 @@ CREATE TABLE `teams` (
   `code` varchar(255) NOT NULL,
   `region` varchar(255) NOT NULL,
   PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=latin1;""")
+) ENGINE=MYISAM DEFAULT CHARSET=latin1;""")
 
 insert_match = (
     """INSERT INTO matches
@@ -154,46 +155,44 @@ insert_player_score = (
        (player_id,match_id,kills,deaths,assists,creep_score,double_kills,triple_kills,quadra_kills,penta_kills,points)
        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""")
 
-# Epoch times for splits' start and end dates
-season4_summer_starts = {"NA": calendar.timegm(time.strptime("2014-05-23T00:00", "%Y-%m-%dT%H:%M")),
-                         "EU": calendar.timegm(time.strptime("2014-05-20T00:00", "%Y-%m-%dT%H:%M"))}
-season4_summer_ends = {"NA": calendar.timegm(time.strptime("2014-08-05T00:00", "%Y-%m-%dT%H:%M")),
-                       "EU": calendar.timegm(time.strptime("2014-08-02T00:00", "%Y-%m-%dT%H:%M"))}
 # DB connection
-db_conn = pymysql.connect(host=db_host, port=db_port, user=db_user, passwd=db_pass, db=db_database, autocommit=True)
+db_conn = pymysql.connect(host=db_host, port=db_port, user=db_user, passwd=db_pass, db=db_database, autocommit=False)
 
 # SQL structure creation
 cur = db_conn.cursor()
 cur.execute(sql_structure)
-cur.close()
 
-# Get the main stat JSONs from the API
-conns = {"NA": requests.get(stats_api % (regions["NA"], season4_summer_starts["NA"], season4_summer_ends["NA"])),
-         "EU": requests.get(stats_api % (regions["EU"], season4_summer_starts["EU"], season4_summer_ends["EU"]))}
+stats = {}
+start_times = {}
+end_times = {}
 
-# OrderedDicts are necessary for the player to team mappings (they are connected by order, no IDs, bad Rito)
-stats = {"NA": json.loads(conns["NA"].text, object_pairs_hook=collections.OrderedDict),
-         "EU": json.loads(conns["EU"].text, object_pairs_hook=collections.OrderedDict)}
+for tournamentkey, tournament in tournaments.items():
+    tournament_data = json.loads(requests.get(tournament_api % tournament).text)
+    # Creating tournament data dictionaries
+    start_times[tournamentkey] = calendar.timegm(time.strptime(tournament_data["dateBegin"], "%Y-%m-%dT%H:%MZ"))
+    end_times[tournamentkey] = calendar.timegm(time.strptime(tournament_data["dateEnd"], "%Y-%m-%dT%H:%MZ"))
+    stats[tournamentkey] = json.loads(requests.get(stats_api % (tournaments[tournamentkey], start_times[tournamentkey], end_times[tournamentkey])).text)
 
-known_teams = []
-known_players = []
-cur = db_conn.cursor()
-for regionkey, region_stats in stats.items():
+    # Adding tournament teams
+    for contestant in tournament_data["contestants"].values():
+        cur.execute(insert_team % (contestant["id"],
+                                   contestant["name"].strip(),
+                                   contestant["acronym"],
+                                   tournament_data["name"][:2]))
 
-    # Adding matches, teams and team stats
-    for game in region_stats["teamStats"].values():
-        match_data = json.loads(requests.get(match_api % game["matchId"]).text)
+        # Adding their players
+        team_data = json.loads(requests.get(team_api % contestant["id"]).text)
+        for player in team_data["roster"].values():
+            cur.execute(insert_player % (player["playerId"],
+                                         contestant["id"],
+                                         player["name"],
+                                         player["role"]))
+
+    # Adding matches and team stats
+    for teamgamekey, teamgame in stats[tournamentkey]["teamStats"].items():
+        match_data = json.loads(requests.get(match_api % teamgame["matchId"]).text)
         team_blue = match_data["contestants"]["blue"]
         team_red = match_data["contestants"]["red"]
-
-        # Add the teams that are not already known to the DB and the known teams list
-        for team in match_data["contestants"].values():
-            if team["id"] not in known_teams:
-                cur.execute(insert_team % (team["id"],
-                                           team["name"].strip(),
-                                           team["acronym"],
-                                           regionkey))
-                known_teams.append(team["id"])
 
         # Add the match data to the DB
         cur.execute(insert_match % (match_data["matchId"],
@@ -203,10 +202,10 @@ for regionkey, region_stats in stats.items():
                                     match_data["tournament"]["round"]))
 
         # Add the team scores to the DB
-        for teamkey, team in game.items():
+        for teamkey, team in teamgame.items():
             if "team" in teamkey:  # JSON element is a team point summary
                 cur.execute(insert_team_score % (team["teamId"],
-                                                 game["matchId"],
+                                                 teamgame["matchId"],
                                                  "blue" if team["teamId"] == int(team_blue["id"]) else "red",
                                                  team["matchVictory"],
                                                  team["matchDefeat"],
@@ -222,41 +221,28 @@ for regionkey, region_stats in stats.items():
                                                                    team["firstBlood"],
                                                                    team["towersKilled"])))
 
-    # Adding players and player stats
-    for gamekey, game in region_stats["playerStats"].items():
-        for playerkey, player in game.items():
+        # Add the player scores to the DB
+    for playergamekey, playergame in stats[tournamentkey]["playerStats"].items():
+        for playerkey, player in playergame.items():
             if "player" in playerkey:  # JSON element is a player point summary
-
-                # Add the players that are not already known to the DB and the known players list
-                if player["playerId"] not in known_players:
-                    teams = []
-                    for teamkey, team in region_stats["teamStats"][gamekey].items():
-                        if "team" in teamkey:
-                            teams.append(team["teamId"])
-                    cur.execute(insert_player % (player["playerId"],
-                                                 teams[0] if list(game.keys()).index(playerkey) <= 7 else teams[1],
-                                                 player["playerName"],
-                                                 player["role"]))
-                    known_players.append(player["playerId"])
-
-                # Add the player scores to the DB
                 cur.execute(insert_player_score % (player["playerId"],
-                                                   game["matchId"],
+                                                   playergame["matchId"],
                                                    player["kills"],
                                                    player["deaths"],
                                                    player["assists"],
                                                    player["minionKills"],
-                                                   player["doubleKills"],
-                                                   player["tripleKills"],
-                                                   player["quadraKills"],
+                                                   player["doubleKills"] - player["tripleKills"],
+                                                   player["tripleKills"] - player["quadraKills"],
+                                                   player["quadraKills"] - player["pentaKills"],
                                                    player["pentaKills"],
                                                    score_player_points(player["kills"],
                                                                        player["deaths"],
                                                                        player["assists"],
                                                                        player["minionKills"],
-                                                                       player["tripleKills"],
-                                                                       player["quadraKills"],
+                                                                       player["tripleKills"] - player["quadraKills"],
+                                                                       player["quadraKills"] - player["pentaKills"],
                                                                        player["pentaKills"])))
 
+db_conn.commit()
 cur.close()
 db_conn.close()
