@@ -7,17 +7,17 @@ import pymysql
 # Configuration values for database
 db_host = "host"
 db_port = 3306
-db_user = "username"
-db_pass = "password"
-db_database = "database"
+db_user = "user"
+db_pass = "pass"
+db_database = "db"
 
 # Constants used in the program
 tournaments = {"S4SUMMERNA": 104, "S4SUMMEREU": 102}
-# Variables: Region ID, Start time for Matches (seconds since epoch), End time for matches (seconds since epoch)
-stats_api = "http://euw.lolesports.com/api/gameStatsFantasy.json?tournamentId=%s&dateBegin=%s&dateEnd=%s"
-match_api = "http://euw.lolesports.com/api/match/%s.json"  # Variables: Match ID
-tournament_api = "http://euw.lolesports.com/api/tournament/%s.json"  # Variables: Tournament ID
-team_api = "http://euw.lolesports.com/api/team/%s.json"  # Variable: Team ID
+stats_api = "http://na.lolesports.com/api/gameStatsFantasy.json?tournamentId=%s&dateBegin=%s&dateEnd=%s"  # Variables: Region ID, Start time for Matches (seconds since epoch), End time for matches (seconds since epoch)
+schedule_api = "http://euw.lolesports.com:80/api/schedule.json?tournamentId=%s&includeFinished=true&includeFuture=true&includeLive=true"  # Variables: Tournament ID
+tournament_api = "http://na.lolesports.com/api/tournament/%s.json"  # Variables: Tournament ID
+team_api = "http://na.lolesports.com/api/team/%s.json"  # Variables: Team ID
+player_stats_api = "http://euw.lolesports.com:80/api/all-player-stats.json?tournamentId=%s"  # Variables: Tournament ID
 
 
 def score_team_points(victory, barons, dragons, first_blood, towers):
@@ -51,7 +51,9 @@ CREATE TABLE `matches` (
   `team1_id` int(11) NOT NULL,
   `team2_id` int(11) NOT NULL,
   `datetime` datetime NOT NULL,
-  `week` varchar(255) NOT NULL,
+  `week` int(11) NOT NULL,
+  `tournament` varchar(255) NOT NULL,
+  `is_finished` int(11) NOT NULL,
   PRIMARY KEY (`id`),
   KEY `fk_matches_team1_id` (`team1_id`),
   KEY `fk_matches_team2_id` (`team2_id`),
@@ -90,6 +92,9 @@ CREATE TABLE `players` (
   `team_id` int(11) NOT NULL,
   `name` varchar(255) NOT NULL,
   `role` varchar(255) NOT NULL,
+  `average_kda` float(11,2) NOT NULL ,
+  `average_total_gold` float(11,2) NOT NULL ,
+  `average_gpm` float(11,2) NOT NULL ,
   PRIMARY KEY (`id`),
   KEY `fk_players_team_id` (`team_id`),
   CONSTRAINT `fk_players_team_id` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
@@ -132,8 +137,8 @@ CREATE TABLE `teams` (
 
 insert_match = (
     """INSERT INTO matches
-       (id,team1_id,team2_id,datetime,week)
-       VALUES(%s,%s,%s,STR_TO_DATE('%s','%%Y-%%m-%%dT%%H:%%iZ'),%s)""")
+       (id,team1_id,team2_id,datetime,tournament,week,is_finished)
+       VALUES(%s,%s,%s,STR_TO_DATE('%s','%%Y-%%m-%%dT%%H:%%iZ'),'%s',%s,%s)""")
 
 insert_team = (
     """INSERT INTO teams
@@ -147,8 +152,8 @@ insert_team_score = (
 
 insert_player = (
     """INSERT INTO players
-       (id,team_id,name,role)
-       VALUES(%s,%s,'%s','%s')""")
+       (id,team_id,name,role,average_kda,average_total_gold,average_gpm)
+       VALUES(%s,%s,'%s','%s',%s,%s,%s)""")
 
 insert_player_score = (
     """INSERT INTO player_scores
@@ -162,15 +167,21 @@ db_conn = pymysql.connect(host=db_host, port=db_port, user=db_user, passwd=db_pa
 cur = db_conn.cursor()
 cur.execute(sql_structure)
 
+schedules = {}
+player_stats = {}
 stats = {}
 start_times = {}
 end_times = {}
 
 for tournamentkey, tournament in tournaments.items():
+    ltrto = time.time()
     tournament_data = json.loads(requests.get(tournament_api % tournament).text)
+
     # Creating tournament data dictionaries
     start_times[tournamentkey] = calendar.timegm(time.strptime(tournament_data["dateBegin"], "%Y-%m-%dT%H:%MZ"))
     end_times[tournamentkey] = calendar.timegm(time.strptime(tournament_data["dateEnd"], "%Y-%m-%dT%H:%MZ"))
+    schedules[tournamentkey] = json.loads(requests.get(schedule_api % tournament).text)
+    player_stats[tournamentkey] = json.loads(requests.get(player_stats_api % tournament).text)
     stats[tournamentkey] = json.loads(requests.get(stats_api % (tournaments[tournamentkey], start_times[tournamentkey], end_times[tournamentkey])).text)
 
     # Adding tournament teams
@@ -186,42 +197,48 @@ for tournamentkey, tournament in tournaments.items():
             cur.execute(insert_player % (player["playerId"],
                                          contestant["id"],
                                          player["name"],
-                                         player["role"]))
+                                         player["role"],
+                                         player_stats[tournamentkey].get(str(player["playerId"]), {"kda": 0})["kda"],
+                                         player_stats[tournamentkey].get(str(player["playerId"]), {"average total_gold": 0})["average total_gold"],
+                                         player_stats[tournamentkey].get(str(player["playerId"]), {"gpm": 0})["gpm"]))
 
-    # Adding matches and team stats
-    for teamgamekey, teamgame in stats[tournamentkey]["teamStats"].items():
-        match_data = json.loads(requests.get(match_api % teamgame["matchId"]).text)
-        team_blue = match_data["contestants"]["blue"]
-        team_red = match_data["contestants"]["red"]
+    # Adding all matches from schedule
+    for match in schedules[tournamentkey].values():
+        team_blue = match["contestants"]["blue"]
+        team_red = match["contestants"]["red"]
 
         # Add the match data to the DB
-        cur.execute(insert_match % (match_data["matchId"],
+        cur.execute(insert_match % (match["matchId"],
                                     team_blue["id"],
                                     team_red["id"],
-                                    match_data["dateTime"],
-                                    match_data["tournament"]["round"]))
+                                    match["dateTime"],
+                                    match["tournament"]["name"],
+                                    match["tournament"]["round"],
+                                    match["isFinished"]))
 
-        # Add the team scores to the DB
-        for teamkey, team in teamgame.items():
-            if "team" in teamkey:  # JSON element is a team point summary
-                cur.execute(insert_team_score % (team["teamId"],
-                                                 teamgame["matchId"],
-                                                 "blue" if team["teamId"] == int(team_blue["id"]) else "red",
-                                                 team["matchVictory"],
-                                                 team["matchDefeat"],
-                                                 team["baronsKilled"],
-                                                 team["dragonsKilled"],
-                                                 team["firstBlood"],
-                                                 team["firstTower"],
-                                                 team["firstInhibitor"],
-                                                 team["towersKilled"],
-                                                 score_team_points(team["matchVictory"],
-                                                                   team["baronsKilled"],
-                                                                   team["dragonsKilled"],
-                                                                   team["firstBlood"],
-                                                                   team["towersKilled"])))
+        # If the match has been finished, add the team's data to the DB
+        if int(match["isFinished"]) == 1:
+            for game in match["games"].values():
+                for teamkey, team in stats[tournamentkey]["teamStats"]["game" + str(game["id"])].items():
+                    if "team" in teamkey:  # JSON element is a team point summary
+                        cur.execute(insert_team_score % (team["teamId"],
+                                                         match["matchId"],
+                                                         "blue" if team["teamId"] == int(team_blue["id"]) else "red",
+                                                         team["matchVictory"],
+                                                         team["matchDefeat"],
+                                                         team["baronsKilled"],
+                                                         team["dragonsKilled"],
+                                                         team["firstBlood"],
+                                                         team["firstTower"],
+                                                         team["firstInhibitor"],
+                                                         team["towersKilled"],
+                                                         score_team_points(team["matchVictory"],
+                                                                           team["baronsKilled"],
+                                                                           team["dragonsKilled"],
+                                                                           team["firstBlood"],
+                                                                           team["towersKilled"])))
 
-        # Add the player scores to the DB
+    # Add the player scores to the DB
     for playergamekey, playergame in stats[tournamentkey]["playerStats"].items():
         for playerkey, player in playergame.items():
             if "player" in playerkey:  # JSON element is a player point summary
