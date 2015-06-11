@@ -5,18 +5,18 @@ import requests
 import pymysql
 
 # Configuration values for database
-db_host = "host"
+db_host = "localhost"
 db_port = 3306
-db_user = "user"
-db_pass = "pass"
-db_database = "db"
+db_user = "root"
+db_pass = "password"
+db_database = "flcs"
 
 # Constants used in the program
-tournaments = {"S4SUMMERNA": 104, "S4SUMMEREU": 102}
-stats_api = "http://na.lolesports.com/api/gameStatsFantasy.json?tournamentId=%s&dateBegin=%s&dateEnd=%s"  # Variables: Region ID, Start time for Matches (seconds since epoch), End time for matches (seconds since epoch)
+tournaments = {"S5SUMMEREU": 225, "S5SUMMERNA": 226}
+stats_api = "http://euw.lolesports.com:80/api/gameStatsFantasy.json?tournamentId=%s&dateBegin=%s&dateEnd=%s"  # Variables: Region ID, Start time for Matches (seconds since epoch), End time for matches (seconds since epoch)
 schedule_api = "http://euw.lolesports.com:80/api/schedule.json?tournamentId=%s&includeFinished=true&includeFuture=true&includeLive=true"  # Variables: Tournament ID
-tournament_api = "http://na.lolesports.com/api/tournament/%s.json"  # Variables: Tournament ID
-team_api = "http://na.lolesports.com/api/team/%s.json"  # Variables: Team ID
+tournament_api = "http://euw.lolesports.com:80/api/tournament/%s.json"  # Variables: Tournament ID
+team_api = "http://euw.lolesports.com:80/api/team/%s.json"  # Variables: Team ID
 player_stats_api = "http://euw.lolesports.com:80/api/all-player-stats.json?tournamentId=%s"  # Variables: Tournament ID
 
 
@@ -92,6 +92,7 @@ CREATE TABLE `players` (
   `team_id` int(11) NOT NULL,
   `name` varchar(255) NOT NULL,
   `role` varchar(255) NOT NULL,
+  `is_starter` int(11) NOT NULL,
   `average_kda` float(11,2) NOT NULL ,
   `average_total_gold` float(11,2) NOT NULL ,
   `average_gpm` float(11,2) NOT NULL ,
@@ -131,7 +132,7 @@ CREATE TABLE `teams` (
   `id` int(11) NOT NULL,
   `name` varchar(255) NOT NULL,
   `code` varchar(255) NOT NULL,
-  `region` varchar(255) NOT NULL,
+  `league` varchar(255) NOT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=MYISAM DEFAULT CHARSET=latin1;""")
 
@@ -142,7 +143,7 @@ insert_match = (
 
 insert_team = (
     """INSERT INTO teams
-       (id,name,code,region)
+       (id,name,code,league)
        VALUES(%s,'%s','%s','%s')""")
 
 insert_team_score = (
@@ -152,8 +153,11 @@ insert_team_score = (
 
 insert_player = (
     """INSERT INTO players
-       (id,team_id,name,role,average_kda,average_total_gold,average_gpm)
-       VALUES(%s,%s,'%s','%s',%s,%s,%s)""")
+       (id,team_id,name,role,is_starter,average_kda,average_total_gold,average_gpm)
+       VALUES(%s,%s,'%s','%s',%s,%s,%s,%s)""")
+
+delete_player = (
+    """DELETE FROM players WHERE id=%s""")
 
 insert_player_score = (
     """INSERT INTO player_scores
@@ -173,37 +177,45 @@ stats = {}
 start_times = {}
 end_times = {}
 
-for tournamentkey, tournament in tournaments.items():
-    ltrto = time.time()
+for tournamentKey, tournament in tournaments.items():
     tournament_data = json.loads(requests.get(tournament_api % tournament).text)
 
     # Creating tournament data dictionaries
-    start_times[tournamentkey] = calendar.timegm(time.strptime(tournament_data["dateBegin"], "%Y-%m-%dT%H:%MZ"))
-    end_times[tournamentkey] = calendar.timegm(time.strptime(tournament_data["dateEnd"], "%Y-%m-%dT%H:%MZ"))
-    schedules[tournamentkey] = json.loads(requests.get(schedule_api % tournament).text)
-    player_stats[tournamentkey] = json.loads(requests.get(player_stats_api % tournament).text)
-    stats[tournamentkey] = json.loads(requests.get(stats_api % (tournaments[tournamentkey], start_times[tournamentkey], end_times[tournamentkey])).text)
+    start_times[tournamentKey] = calendar.timegm(time.strptime(tournament_data["dateBegin"], "%Y-%m-%dT%H:%MZ"))
+    end_times[tournamentKey] = calendar.timegm(time.strptime(tournament_data["dateEnd"], "%Y-%m-%dT%H:%MZ"))
+    schedules[tournamentKey] = json.loads(requests.get(schedule_api % tournament).text)
+    player_stats[tournamentKey] = json.loads(requests.get(player_stats_api % tournament).text)
+    stats[tournamentKey] = json.loads(requests.get(stats_api % (tournaments[tournamentKey], start_times[tournamentKey], end_times[tournamentKey])).text)
 
     # Adding tournament teams
     for contestant in tournament_data["contestants"].values():
         cur.execute(insert_team % (contestant["id"],
                                    contestant["name"].strip(),
                                    contestant["acronym"],
-                                   tournament_data["name"][:2]))
+                                   tournament_data["name"]))
 
         # Adding their players
         team_data = json.loads(requests.get(team_api % contestant["id"]).text)
         for player in team_data["roster"].values():
-            cur.execute(insert_player % (player["playerId"],
-                                         contestant["id"],
-                                         player["name"],
-                                         player["role"],
-                                         player_stats[tournamentkey].get(str(player["playerId"]), {"kda": 0})["kda"],
-                                         player_stats[tournamentkey].get(str(player["playerId"]), {"average total_gold": 0})["average total_gold"],
-                                         player_stats[tournamentkey].get(str(player["playerId"]), {"gpm": 0})["gpm"]))
+            while True:
+                try:
+                    cur.execute(insert_player % (player["playerId"],
+                                                 contestant["id"],
+                                                 player["name"],
+                                                 player["role"],
+                                                 player["isStarter"],
+                                                 player_stats[tournamentKey].get(str(player["playerId"]), {"kda": 0})["kda"],
+                                                 player_stats[tournamentKey].get(str(player["playerId"]), {"average total_gold": 0})["average total_gold"],
+                                                 player_stats[tournamentKey].get(str(player["playerId"]), {"gpm": 0})["gpm"]))
+                except pymysql.IntegrityError as e:
+                    if e.args[0] == 1062:
+                        if player["isStarter"] == 1:
+                            cur.execute(delete_player % player["playerId"])
+                            continue
+                break
 
     # Adding all matches from schedule
-    for match in schedules[tournamentkey].values():
+    for match in schedules[tournamentKey].values():
         team_blue = match["contestants"]["blue"]
         team_red = match["contestants"]["red"]
 
@@ -219,7 +231,7 @@ for tournamentkey, tournament in tournaments.items():
         # If the match has been finished, add the team's data to the DB
         if int(match["isFinished"]) == 1:
             for game in match["games"].values():
-                for teamkey, team in stats[tournamentkey]["teamStats"]["game" + str(game["id"])].items():
+                for teamkey, team in stats[tournamentKey]["teamStats"]["game" + str(game["id"])].items():
                     if "team" in teamkey:  # JSON element is a team point summary
                         cur.execute(insert_team_score % (team["teamId"],
                                                          match["matchId"],
@@ -239,7 +251,7 @@ for tournamentkey, tournament in tournaments.items():
                                                                            team["towersKilled"])))
 
     # Add the player scores to the DB
-    for playergamekey, playergame in stats[tournamentkey]["playerStats"].items():
+    for playergamekey, playergame in stats[tournamentKey]["playerStats"].items():
         for playerkey, player in playergame.items():
             if "player" in playerkey:  # JSON element is a player point summary
                 cur.execute(insert_player_score % (player["playerId"],
